@@ -1,27 +1,5 @@
 import OpenAI from "openai";
 
-type NutritionResponse = {
-  protein: number;
-  calories: number;
-  carbs: number;
-  fat: number;
-  vitaminA: number;
-  vitaminC: number;
-  vitaminD: number;
-  vitaminE: number;
-  vitaminK: number;
-  vitaminB12: number;
-  iron: number;
-  calcium: number;
-  magnesium: number;
-  zinc: number;
-  water: number;
-  sodium: number;
-  potassium: number;
-  chloride: number;
-  fiber: number;
-};
-
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST requests allowed" });
@@ -36,44 +14,65 @@ export default async function handler(req: any, res: any) {
   try {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // Build a single string prompt
-    let prompt = `You are a precise nutrition expert. Analyze the meal below and return ONLY valid JSON with numeric values for ALL keys, even if some are 0:
-{"protein","calories","carbs","fat",
-"vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12",
-"iron","calcium","magnesium","zinc",
-"water","sodium","potassium","chloride","fiber"}.
-
-Meal description: ${description || "(no description)"}`;
-
-    if (photoUrl) {
-      prompt += `\nImage URL: ${photoUrl}`;
+    const content: any[] = [];
+    if (description) {
+      content.push({
+        type: "text",
+        text: `You are a nutrition expert. Return ONLY valid JSON with all numeric keys below:
+{"protein","calories","carbs","fat","vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12","iron","calcium","magnesium","zinc","water","sodium","potassium","chloride","fiber"}
+Analyze this meal: ${description}`,
+      });
     }
 
-    console.log("📡 Sending prompt to OpenAI:", prompt);
+    if (photoUrl) {
+      content.push({
+        type: "image_url",
+        image_url: { url: photoUrl },
+      });
+    }
 
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
+      model: "gpt-4o-mini", // supports vision + text
+      messages: [
+        {
+          role: "user",
+          content,
+        },
+      ],
     });
 
     const reply = completion.choices?.[0]?.message?.content ?? "";
 
-    console.log("📥 Raw GPT reply:", reply);
+    // Extract JSON from reply (handles extra text/code fences)
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    let parsed: any = {};
 
-    let parsed: NutritionResponse = {
-      protein: 0, calories: 0, carbs: 0, fat: 0,
-      vitaminA: 0, vitaminC: 0, vitaminD: 0, vitaminE: 0, vitaminK: 0, vitaminB12: 0,
-      iron: 0, calcium: 0, magnesium: 0, zinc: 0,
-      water: 0, sodium: 0, potassium: 0, chloride: 0, fiber: 0,
-    };
-
-    try {
-      parsed = JSON.parse(reply);
-    } catch (e) {
-      console.warn("⚠️ Could not parse AI response, reply was:", reply);
+    if (jsonMatch) {
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        console.warn("⚠️ Could not parse AI JSON, fallback applied:", reply);
+      }
+    } else {
+      console.warn("⚠️ AI reply had no JSON:", reply);
     }
 
-    return res.status(200).json(parsed);
+    // Ensure all keys exist
+    const keys = [
+      "protein","calories","carbs","fat",
+      "vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12",
+      "iron","calcium","magnesium","zinc",
+      "water","sodium","potassium","chloride",
+      "fiber"
+    ];
+
+    const finalParsed: Record<string, number> = {};
+    for (const key of keys) {
+      finalParsed[key] = Number(parsed[key] ?? 0);
+    }
+
+    return res.status(200).json(finalParsed);
+
   } catch (err: any) {
     console.error("❌ Backend error:", err?.response?.data || err);
     return res.status(500).json({ error: "Something went wrong", details: err?.message });
