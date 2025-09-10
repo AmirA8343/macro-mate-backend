@@ -26,7 +26,7 @@ export default async function handler(req: any, res: any) {
       content.push({
         type: "text",
         text: `Estimate nutrition for this meal. 
-Return ONLY JSON like: {"protein": number, "calories": number, "carbs": number, "fat": number}. 
+Return ONLY valid JSON with these keys: {"protein": number, "calories": number, "carbs": number, "fat": number}. 
 Meal: ${description}`,
       });
     }
@@ -48,17 +48,17 @@ Meal: ${description}`,
     });
 
     const reply = completion.choices?.[0]?.message?.content ?? "";
-    let parsed: NutritionResponse;
+    let parsed: NutritionResponse = { protein: 0, calories: 0, carbs: 0, fat: 0 };
 
     try {
       parsed = JSON.parse(reply);
-    } catch {
-      parsed = { protein: 0, calories: 0, carbs: 0, fat: 0 };
+    } catch (e) {
+      console.warn("⚠️ Could not parse AI response, reply was:", reply);
     }
 
-    return res.status(200).json({ ok: true, parsed, raw: reply });
+    return res.status(200).json(parsed);
   } catch (err: any) {
-    console.error("Backend error:", err?.response?.data || err);
+    console.error("❌ Backend error:", err?.response?.data || err);
     return res.status(500).json({ error: "Something went wrong", details: err?.message });
   }
 }
