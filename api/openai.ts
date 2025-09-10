@@ -44,10 +44,15 @@ export default async function handler(req: any, res: any) {
     if (description) {
       content.push({
         type: "text",
-        text: `Estimate nutrition for this meal. Return ONLY valid JSON with numeric values for these keys:
-{"protein","calories","carbs","fat","vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12",
-"iron","calcium","magnesium","zinc","water","sodium","potassium","chloride","fiber"}.
-Meal: ${description}`,
+        text: `You are a precise nutrition expert. Analyze the meal below and return ONLY valid JSON with numeric values for ALL keys, even if some are 0:
+{"protein","calories","carbs","fat",
+"vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12",
+"iron","calcium","magnesium","zinc",
+"water","sodium","potassium","chloride","fiber"}.
+
+Meal description: ${description}
+
+⚠️ Respond ONLY with the JSON object, nothing else.`
       });
     }
 
@@ -57,6 +62,8 @@ Meal: ${description}`,
         image_url: { url: photoUrl },
       });
     }
+
+    console.log("📡 Sending request to OpenAI:", { description, photoUrl });
 
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini", // supports vision + text
@@ -69,8 +76,8 @@ Meal: ${description}`,
     });
 
     const reply = completion.choices?.[0]?.message?.content ?? "";
+    console.log("📥 Raw OpenAI reply:", reply);
 
-    // Default all nutrients to 0
     let parsed: NutritionResponse = {
       protein: 0,
       calories: 0,
@@ -95,17 +102,13 @@ Meal: ${description}`,
 
     try {
       const parsedJson = JSON.parse(reply);
-      // Assign only keys that exist in our type
-      for (const key of Object.keys(parsed)) {
-        if (parsedJson[key] !== undefined) {
-          parsed[key as keyof NutritionResponse] = Math.round(Number(parsedJson[key])) || 0;
-        }
-      }
+      parsed = { ...parsed, ...parsedJson };
     } catch (e) {
-      console.warn("⚠️ Could not parse AI response, reply was:", reply);
+      console.warn("⚠️ Could not parse AI response, using defaults. Reply was:", reply);
     }
 
-    return res.status(200).json({ ok: true, parsed, raw: reply });
+    console.log("✅ Parsed nutrition:", parsed);
+    return res.status(200).json(parsed);
   } catch (err: any) {
     console.error("❌ Backend error:", err?.response?.data || err);
     return res.status(500).json({ error: "Something went wrong", details: err?.message });
