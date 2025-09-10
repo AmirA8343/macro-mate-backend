@@ -1,66 +1,39 @@
 import OpenAI from "openai";
 
 export default async function handler(req, res) {
-  // --- CORS headers (needed for Expo fetch) ---
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end(); // preflight
-  }
-
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST requests allowed" });
   }
 
-  try {
-    const { messages, description, photoUrl } = req.body;
+  const { description, photoUrl } = req.body;
 
+  if (!description && !photoUrl) {
+    return res.status(400).json({ error: "Provide description or photoUrl" });
+  }
+
+  try {
     const client = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    // Build messages array
-    const msgArray: any[] = [];
-
-    if (messages && Array.isArray(messages)) {
-      msgArray.push(...messages);
-    } else {
-      // Default nutrition system prompt
-      msgArray.push({
-        role: "system",
-        content:
-          "You are a precise nutrition expert. Analyze meals and return structured insights.",
-      });
-
-      msgArray.push({
+    // Build GPT messages
+    const messages = [
+      {
         role: "user",
-        content: description || "No description provided",
-      });
-
-      if (photoUrl) {
-        msgArray.push({
-          role: "user",
-          content: [
-            { type: "text", text: "Here is a meal photo to analyze:" },
-            { type: "image_url", image_url: { url: photoUrl } },
-          ],
-        });
-      }
-    }
+        content: description
+          ? `Analyze nutrition for: ${description} in JSON format with keys: protein, calories, carbs, fat, vitaminA, vitaminC, vitaminD, vitaminE, vitaminK, vitaminB12, iron, calcium, magnesium, zinc, water, sodium, potassium, chloride, fiber`
+          : "Analyze nutrition for uploaded food photo (vision feature)"
+      },
+    ];
 
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini", // can handle text + images
-      messages: msgArray,
-      max_tokens: 600,
+      model: "gpt-4o-mini", // Use GPT-4 for text; GPT-4V later for vision
+      messages,
     });
 
-    res.status(200).json({
-      reply: completion.choices[0].message,
-    });
-  } catch (error) {
-    console.error("❌ OpenAI API error:", error);
+    res.status(200).json({ reply: completion.choices[0].message });
+  } catch (err) {
+    console.error("OpenAI error:", err);
     res.status(500).json({ error: "Something went wrong" });
   }
 }
