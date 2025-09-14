@@ -1,3 +1,4 @@
+// api/nutrition.ts
 import OpenAI from "openai";
 
 export default async function handler(req: any, res: any) {
@@ -14,50 +15,37 @@ export default async function handler(req: any, res: any) {
   try {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const content: any[] = [];
-    if (description) {
-      content.push({
-        type: "text",
-        text: `You are a nutrition expert. Return ONLY valid JSON with all numeric keys below:
-{"protein","calories","carbs","fat","vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12","iron","calcium","magnesium","zinc","water","sodium","potassium","chloride","fiber"}
-Analyze this meal: ${description}`,
-      });
-    }
+    const systemPrompt = `You are a precise nutrition expert. Analyze the provided meal (text description and/or image).
+Return ONLY a single JSON object (no surrounding text) with numeric values (integers) for ALL keys.
+If unknown, return 0. Respond with JSON only.`;
+
+    const messages: any[] = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: description?.trim() || "(no description)" },
+    ];
 
     if (photoUrl) {
-      content.push({
-        type: "image_url",
-        image_url: { url: photoUrl },
-      });
+      messages.push({ role: "user", content: "Image attached (analyze this as part of the meal)." });
+      messages.push({ role: "user", content: [{ type: "image_url", image_url: { url: photoUrl } }] });
     }
 
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini", // supports vision + text
-      messages: [
-        {
-          role: "user",
-          content,
-        },
-      ],
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.0,
+      max_tokens: 600,
     });
 
     const reply = completion.choices?.[0]?.message?.content ?? "";
 
-    // Extract JSON from reply (handles extra text/code fences)
-    const jsonMatch = reply.match(/\{[\s\S]*\}/);
-    let parsed: any = {};
-
-    if (jsonMatch) {
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (e) {
-        console.warn("⚠️ Could not parse AI JSON, fallback applied:", reply);
-      }
-    } else {
-      console.warn("⚠️ AI reply had no JSON:", reply);
+    // Extract JSON safely
+    let parsed: Record<string, any> | null = null;
+    try {
+      parsed = JSON.parse(reply.match(/\{[\s\S]*\}/)?.[0] || "{}");
+    } catch {
+      parsed = {};
     }
 
-    // Ensure all keys exist
     const keys = [
       "protein","calories","carbs","fat",
       "vitaminA","vitaminC","vitaminD","vitaminE","vitaminK","vitaminB12",
@@ -68,7 +56,7 @@ Analyze this meal: ${description}`,
 
     const finalParsed: Record<string, number> = {};
     for (const key of keys) {
-      finalParsed[key] = Number(parsed[key] ?? 0);
+      finalParsed[key] = Number(parsed?.[key] ?? 0); // ✅ optional chaining
     }
 
     return res.status(200).json(finalParsed);
