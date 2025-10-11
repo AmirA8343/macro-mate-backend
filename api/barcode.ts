@@ -1,4 +1,3 @@
-// api/barcode.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -14,91 +13,105 @@ function safeNum(v: any) {
   return Number.isFinite(n) ? Math.round(n) : 0;
 }
 
-/** Scale a per-100g/100ml value to the product's serving size (e.g., 48 kcal per 100ml with servingSize "710 ml" → 340). */
 function scalePerServing(valuePer100: any, servingSize: string | undefined) {
   const n = Number(valuePer100);
   if (!Number.isFinite(n) || !servingSize) return safeNum(valuePer100);
   const m = servingSize.match(/([\d.]+)\s*(ml|g)\b/i);
   if (!m) return safeNum(valuePer100);
-  const amount = parseFloat(m[1]); // e.g., 710
+  const amount = parseFloat(m[1]);
   if (!Number.isFinite(amount) || amount <= 0) return safeNum(valuePer100);
   return Math.round((n * amount) / 100);
 }
 
-/* -------------------------- helpers: type classification -------------------------- */
-const NON_FOOD_KEYWORDS = [
-  "soap","detergent","toothpaste","shampoo","cleaner","bleach","lotion","deodorant",
-  "cosmetic","conditioner","dishwashing","laundry","air freshener","pet food","cat litter"
-];
-const LIQUID_HINTS = [
-  "ml","drink","juice","water","milk","coffee","tea","energy","soda","cola",
-  "beverage","sports drink","sparkling"
-];
-const SOLID_HINTS = [
-  "g","chips","snack","bar","bread","rice","cereal","meat","pasta","cookie",
-  "cracker","granola","nuts","candy","chocolate"
-];
-const PORTION_HINTS = ["portion","serving","slice","bar","cup","piece","pack"];
+/* -------------------------------------------------------------------------- */
+/*                             🧠 EDIBILITY GUARD                             */
+/* -------------------------------------------------------------------------- */
 
-function containsAny(hay: string, words: string[]) {
-  const s = hay.toLowerCase();
-  return words.some(w => s.includes(w));
+const BLOCK_COSMETIC = [
+  "sunscreen","spf","sun screen","uv","broad spectrum","moisturizer","cleanser","serum",
+  "retinol","niacinamide","hyaluronic","cream","lotion","ointment","balm","mask","peel",
+  "exfoliant","skin","face","body","shampoo","conditioner","hair","deodorant","antiperspirant",
+  "makeup","cosmetic","fragrance","parfum","perfume","aftershave","lipstick","lip balm"
+];
+const BLOCK_HOUSEHOLD = [
+  "detergent","bleach","disinfectant","cleaner","dishwashing","laundry","fabric softener",
+  "air freshener","insecticide","repellent","trash bag","aluminum foil","food wrap","zip bag"
+];
+const BLOCK_CONTAINER = [
+  "refillable","reusable","stainless","plastic","metal","glass","flask","tumbler","thermos",
+  "water bottle","sports bottle","mug","container","jar","lid"
+];
+const BLOCK_CHEMICAL = [
+  "alcohol denat","benzene","sulfate","hydroxide","chloride","titanium dioxide",
+  "zinc oxide","silicone","polyethylene","polypropyl","acrylate","copolymer"
+];
+const PET_NONFOOD = ["cat litter","dog shampoo","flea","tick collar"];
+const FOOD_HINTS = [
+  "sugar","salt","wheat","rice","milk","cream","butter","egg","yeast","cocoa","chocolate",
+  "vanilla","flour","soy","peanut","almond","hazelnut","olive","sunflower","garlic","onion",
+  "tomato","apple","banana","strawberry","meat","fish","chicken","pasta","snack","chips"
+];
+const BEVERAGE_HINTS = [
+  "drink","juice","water","mineral water","spring water","sparkling","soda","cola",
+  "energy drink","sports drink","tea","coffee","smoothie"
+];
+
+function includesAny(s: string, arr: string[]) {
+  const x = s.toLowerCase();
+  return arr.some(w => x.includes(w));
 }
 
-/** Decide product type from name/categories/serving. */
-function detectProductType(
-  name?: string,
-  categoriesText?: string,
-  servingSize?: string
-): ProductType {
-  const hay = [name ?? "", categoriesText ?? "", servingSize ?? ""].join(" ").toLowerCase();
-
-  if (containsAny(hay, NON_FOOD_KEYWORDS)) return "non_food";
-  if (containsAny(hay, PORTION_HINTS)) return "portion";
-  if (containsAny(hay, LIQUID_HINTS)) return "liquid";
-  if (containsAny(hay, SOLID_HINTS)) return "solid";
-  return "unknown";
+function plausibleNutrition(n: any): boolean {
+  if (!n) return false;
+  const vals = [
+    Number(n["energy-kcal_100g"]),
+    Number(n.proteins_100g),
+    Number(n.carbohydrates_100g),
+    Number(n.fat_100g)
+  ].filter(Number.isFinite);
+  return vals.some(v => v > 0);
 }
 
-/** Parse base amount & unit from serving size; fallback to sensible defaults. */
-function extractBaseAmountAndUnit(
-  servingSize?: string,
-  inferredType: ProductType = "unknown"
-): { baseAmount: number; baseUnit: "ml" | "g" | "portion"; servingSizeOut: string } {
-  const s = (servingSize || "").trim();
-
-  // Try numeric + unit pattern: "710 ml", "355ml", "50 g"
-  const m = s.match(/([\d.]+)\s*(ml|g)\b/i);
-  if (m) {
-    const amt = parseFloat(m[1]);
-    const unit = m[2].toLowerCase() as "ml" | "g";
-    if (Number.isFinite(amt) && amt > 0) {
-      return { baseAmount: Math.round(amt), baseUnit: unit, servingSizeOut: s };
+function isReusableContainer(name: string, categories: string) {
+  const hay = `${name} ${categories}`.toLowerCase();
+  if (hay.includes("water bottle") || includesAny(hay, BLOCK_CONTAINER)) {
+    if (!includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) {
+      return true;
     }
   }
+  return false;
+}
 
-  // Portion-like strings
-  if (containsAny(s, PORTION_HINTS) || inferredType === "portion") {
-    const n = s.match(/([\d.]+)/);
-    const amt = n ? parseFloat(n[1]) : 1;
-    return {
-      baseAmount: Number.isFinite(amt) && amt > 0 ? Math.round(amt) : 1,
-      baseUnit: "portion",
-      servingSizeOut: s || "1 portion",
-    };
-  }
+function guardEdible({
+  name = "",
+  brand = "",
+  categories = "",
+  servingSize = "",
+  nutriments = undefined,
+}: {
+  name?: string;
+  brand?: string;
+  categories?: string;
+  servingSize?: string;
+  nutriments?: any;
+}): { isEdible: boolean; reason: string } {
+  const hay = [name, brand, categories, servingSize].join(" ").toLowerCase();
 
-  // Fallback by detected type
-  switch (inferredType) {
-    case "liquid":
-      return { baseAmount: 100, baseUnit: "ml", servingSizeOut: s || "100 ml" };
-    case "solid":
-      return { baseAmount: 100, baseUnit: "g", servingSizeOut: s || "100 g" };
-    case "portion":
-      return { baseAmount: 1, baseUnit: "portion", servingSizeOut: s || "1 portion" };
-    default:
-      return { baseAmount: 100, baseUnit: "g", servingSizeOut: s || "100 g" };
-  }
+  if (includesAny(hay, PET_NONFOOD)) return { isEdible: false, reason: "pet product" };
+  if (includesAny(hay, BLOCK_COSMETIC) || includesAny(hay, BLOCK_HOUSEHOLD) || includesAny(hay, BLOCK_CHEMICAL))
+    return { isEdible: false, reason: "cosmetic/chemical/household product" };
+  if (isReusableContainer(name, categories)) return { isEdible: false, reason: "reusable container" };
+
+  let score = 0;
+  if (includesAny(hay, BEVERAGE_HINTS)) score += 2;
+  if (includesAny(hay, FOOD_HINTS)) score += 2;
+  if (plausibleNutrition(nutriments)) score += 3;
+  if (includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) score += 3;
+  if (hay.includes("oil") && includesAny(hay, ["skin","hair","body","face"])) score -= 3;
+  if (/\bspf\s?\d{1,3}\b/.test(hay)) score -= 4;
+
+  if (score >= 3) return { isEdible: true, reason: "sufficient edible evidence" };
+  return { isEdible: false, reason: "insufficient edible evidence" };
 }
 
 /* ------------------------------ helpers: output ----------------------------- */
@@ -107,7 +120,6 @@ function buildCompleteNutrition(data: any = {}) {
     name: data.name || "Unknown",
     brand: data.brand || "",
     source: data.source || "unknown",
-
     type: data.type || "unknown",
     servingSize: data.servingSize || "",
     baseAmount: safeNum(data.baseAmount),
@@ -115,12 +127,10 @@ function buildCompleteNutrition(data: any = {}) {
       data.baseUnit === "ml" || data.baseUnit === "g" || data.baseUnit === "portion"
         ? data.baseUnit
         : "g",
-
     protein: safeNum(data.protein),
     calories: safeNum(data.calories),
     carbs: safeNum(data.carbs ?? data.carbohydrates),
     fat: safeNum(data.fat),
-
     vitaminA: safeNum(data.vitaminA),
     vitaminC: safeNum(data.vitaminC),
     vitaminD: safeNum(data.vitaminD),
@@ -131,18 +141,15 @@ function buildCompleteNutrition(data: any = {}) {
     calcium: safeNum(data.calcium),
     magnesium: safeNum(data.magnesium),
     zinc: safeNum(data.zinc),
-
     water: safeNum(data.water),
     sodium: safeNum(data.sodium),
     potassium: safeNum(data.potassium),
     chloride: safeNum(data.chloride),
-
     fiber: safeNum(data.fiber),
     sugar: safeNum(data.sugar),
   };
 }
 
-/** Extract JSON payload from GPT output safely */
 function extractJsonFromText(text: string): any | null {
   if (!text) return null;
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -158,14 +165,11 @@ function extractJsonFromText(text: string): any | null {
 
 /* --------------------------------- handler -------------------------------- */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "GET" && req.method !== "POST") {
+  if (req.method !== "GET" && req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
-  }
 
   const barcode = (req.query.barcode || (req.body as any)?.barcode)?.toString();
-  if (!barcode) {
-    return res.status(400).json({ error: "Missing barcode parameter" });
-  }
+  if (!barcode) return res.status(400).json({ error: "Missing barcode parameter" });
 
   try {
     /* ------------------------------- 1) OpenFoodFacts ------------------------------ */
@@ -178,17 +182,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const brand = p.brands || "";
         const servingRaw = p.serving_size || "";
         const categoriesText = (p.categories_tags || []).join(", ");
-        const type = detectProductType(name, categoriesText, servingRaw);
-
-        if (type === "non_food") {
-          return res.status(200).json({
-            error: "non_food",
-            message: "Sorry, this product is not recognized as an edible item.",
-          });
-        }
-
-        const { baseAmount, baseUnit, servingSizeOut } = extractBaseAmountAndUnit(servingRaw, type);
         const n = p.nutriments || {};
+
+        const guard = guardEdible({ name, brand, categories: categoriesText, servingSize: servingRaw, nutriments: n });
+        if (!guard.isEdible)
+          return res.status(200).json({ error: "non_food", message: guard.reason });
 
         const caloriesPer100 = n["energy-kcal_100g"];
         const proteinPer100 = n.proteins_100g;
@@ -200,28 +198,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           ? n.sodium_100g * 1000
           : undefined;
 
+        const servingSizeOut = servingRaw || "100 g";
+        const baseUnit = servingRaw.includes("ml") ? "ml" : "g";
+        const baseAmount = safeNum(servingSizeOut.match(/[\d.]+/)?.[0]) || 100;
+
         const shouldScale = baseUnit === "ml" || baseUnit === "g";
         const fromOpenFoodFacts = {
           name,
           brand,
           source: "OpenFoodFacts",
-          type,
+          type: baseUnit === "ml" ? "liquid" : "solid",
           servingSize: servingSizeOut,
           baseAmount,
           baseUnit,
-
           calories: shouldScale ? scalePerServing(caloriesPer100, servingSizeOut) : safeNum(caloriesPer100),
-          protein:  shouldScale ? scalePerServing(proteinPer100,  servingSizeOut) : safeNum(proteinPer100),
-          carbs:    shouldScale ? scalePerServing(carbsPer100,    servingSizeOut) : safeNum(carbsPer100),
-          fat:      shouldScale ? scalePerServing(fatPer100,      servingSizeOut) : safeNum(fatPer100),
-          fiber:    shouldScale ? scalePerServing(fiberPer100,    servingSizeOut) : safeNum(fiberPer100),
-          sugar:    shouldScale ? scalePerServing(sugarsPer100,   servingSizeOut) : safeNum(sugarsPer100),
-          sodium:   shouldScale ? scalePerServing(sodiumPer100Mg, servingSizeOut) : safeNum(sodiumPer100Mg),
+          protein: shouldScale ? scalePerServing(proteinPer100, servingSizeOut) : safeNum(proteinPer100),
+          carbs: shouldScale ? scalePerServing(carbsPer100, servingSizeOut) : safeNum(carbsPer100),
+          fat: shouldScale ? scalePerServing(fatPer100, servingSizeOut) : safeNum(fatPer100),
+          fiber: shouldScale ? scalePerServing(fiberPer100, servingSizeOut) : safeNum(fiberPer100),
+          sugar: shouldScale ? scalePerServing(sugarsPer100, servingSizeOut) : safeNum(sugarsPer100),
+          sodium: shouldScale ? scalePerServing(sodiumPer100Mg, servingSizeOut) : safeNum(sodiumPer100Mg),
         };
 
-        if (fromOpenFoodFacts.calories || fromOpenFoodFacts.protein || fromOpenFoodFacts.carbs) {
-          return res.status(200).json(buildCompleteNutrition(fromOpenFoodFacts));
-        }
+        return res.status(200).json(buildCompleteNutrition(fromOpenFoodFacts));
       }
     }
 
@@ -243,45 +242,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (item) {
           const name = item.food_name || "";
           const brand = item.brand_name || "";
-          const servingQty = item.serving_qty;
-          const servingUnit = (item.serving_unit || "").toLowerCase();
-          const servingWeightG = item.serving_weight_grams;
-
-          let type: ProductType = "unknown";
-          let servingStr = "";
-
-          if (servingUnit === "g" || servingUnit === "grams") {
-            servingStr = `${servingQty || servingWeightG || 100} g`;
-            type = "solid";
-          } else if (servingUnit === "ml") {
-            servingStr = `${servingQty || 100} ml`;
-            type = "liquid";
-          } else if (servingWeightG) {
-            servingStr = `${servingWeightG} g`;
-            type = "solid";
-          } else {
-            servingStr = `${servingQty || 1} portion`;
-            type = "portion";
-          }
-
-          if (detectProductType(name, "", servingStr) === "non_food") {
-            return res.status(200).json({
-              error: "non_food",
-              message: "Sorry, this product is not recognized as an edible item.",
-            });
-          }
-
-          const { baseAmount, baseUnit, servingSizeOut } = extractBaseAmountAndUnit(servingStr, type);
+          const servingStr = `${item.serving_qty || 1} ${item.serving_unit || "portion"}`;
+          const guard = guardEdible({
+            name, brand, categories: "", servingSize: servingStr, nutriments: {
+              "energy-kcal_100g": item.nf_calories,
+              proteins_100g: item.nf_protein,
+              carbohydrates_100g: item.nf_total_carbohydrate,
+              fat_100g: item.nf_total_fat,
+            }
+          });
+          if (!guard.isEdible)
+            return res.status(200).json({ error: "non_food", message: guard.reason });
 
           const fromNutritionix = {
             name,
             brand,
             source: "Nutritionix",
-            type,
-            servingSize: servingSizeOut,
-            baseAmount,
-            baseUnit,
-
+            type: "solid",
+            servingSize: servingStr,
+            baseAmount: safeNum(item.serving_qty),
+            baseUnit: item.serving_unit || "portion",
             calories: item.nf_calories,
             protein: item.nf_protein,
             carbs: item.nf_total_carbohydrate,
@@ -290,16 +270,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             sugar: item.nf_sugars,
             sodium: item.nf_sodium,
           };
-
           return res.status(200).json(buildCompleteNutrition(fromNutritionix));
         }
       }
     }
 
     /* ---------------------------------- 3) GPT ----------------------------------- */
-    if (!OPENAI_API_KEY) {
+    if (!OPENAI_API_KEY)
       return res.status(500).json({ error: "Missing OpenAI API key" });
-    }
 
     const systemPrompt = `You are a nutrition expert. Given a barcode number, deduce the most likely packaged edible product and provide estimated nutrition per serving.
 Respond ONLY with JSON including:
@@ -310,11 +288,6 @@ Respond ONLY with JSON including:
 - source: "GPT-4o"
 If not edible, set {"error":"non_food","message":"Sorry, this product is not recognized as an edible item."}`;
 
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `Barcode: ${barcode}` },
-    ];
-
     const gptResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -323,7 +296,10 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        messages,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Barcode: ${barcode}` },
+        ],
         temperature: 0.2,
         max_tokens: 400,
       }),
@@ -332,34 +308,40 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
     const gptJson = await gptResp.json();
     const content: string = gptJson?.choices?.[0]?.message?.content ?? "";
     const parsed = extractJsonFromText(content);
-
-    if (parsed?.error === "non_food") {
+    if (parsed?.error === "non_food")
       return res.status(200).json(parsed);
-    }
 
-    if (parsed) {
-      const type: ProductType = parsed.type || detectProductType(parsed.name, "", parsed.servingSize);
-      const { baseAmount, baseUnit, servingSizeOut } = extractBaseAmountAndUnit(parsed.servingSize, type);
-      const fromGpt = {
-        name: parsed.name,
-        brand: parsed.brand,
-        source: "GPT-4o",
-        type,
-        servingSize: servingSizeOut,
-        baseAmount,
-        baseUnit,
-        calories: parsed.calories,
-        protein: parsed.protein,
-        carbs: parsed.carbs,
-        fat: parsed.fat,
-        fiber: parsed.fiber,
-        sugar: parsed.sugar,
-        sodium: parsed.sodium,
-      };
-      return res.status(200).json(buildCompleteNutrition(fromGpt));
-    }
+    const guard = guardEdible({
+      name: parsed?.name,
+      brand: parsed?.brand,
+      servingSize: parsed?.servingSize,
+      nutriments: {
+        "energy-kcal_100g": parsed?.calories,
+        proteins_100g: parsed?.protein,
+        carbohydrates_100g: parsed?.carbs,
+        fat_100g: parsed?.fat,
+      }
+    });
+    if (!guard.isEdible)
+      return res.status(200).json({ error: "non_food", message: guard.reason });
 
-    return res.status(500).json({ error: "Failed to parse nutrition JSON" });
+    const fromGpt = {
+      name: parsed.name,
+      brand: parsed.brand,
+      source: "GPT-4o",
+      type: parsed.type,
+      servingSize: parsed.servingSize,
+      baseAmount: safeNum(parsed.baseAmount) || 100,
+      baseUnit: parsed.baseUnit || "g",
+      calories: parsed.calories,
+      protein: parsed.protein,
+      carbs: parsed.carbs,
+      fat: parsed.fat,
+      fiber: parsed.fiber,
+      sugar: parsed.sugar,
+      sodium: parsed.sodium,
+    };
+    return res.status(200).json(buildCompleteNutrition(fromGpt));
   } catch (err: any) {
     console.error("❌ Barcode API failed:", err);
     return res.status(500).json({ error: "Server error" });
