@@ -162,12 +162,20 @@ function guardEdible({
   if (includesAny(hay, PET_NONFOOD)) return { isEdible: false, reason: "pet product" };
   if (isReusableContainer(name, categories || "")) return { isEdible: false, reason: "reusable container" };
 
-  const hasCosmetic = includesAny(hay, BLOCK_COSMETIC);
-  const hasHousehold = includesAny(hay, BLOCK_HOUSEHOLD);
-  const hasChemical = includesAny(hay, BLOCK_CHEMICAL);
-  const strongFood = hasStrongFoodEvidence({ hay, nutriments, categoriesTags, servingSize });
-  if ((hasCosmetic || hasHousehold || hasChemical) && !strongFood)
-    return { isEdible: false, reason: "cosmetic/chemical/household product" };
+ const hasCosmetic = includesAny(hay, BLOCK_COSMETIC);
+const hasHousehold = includesAny(hay, BLOCK_HOUSEHOLD);
+const hasChemical = includesAny(hay, BLOCK_CHEMICAL);
+
+// ✅ If clearly a protein/energy/nutrition bar, skip non-food rejection
+const isClearlyBar =
+  /\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay) ||
+  includesAny(hay, ["protein bar", "energy bar", "nutrition bar", "builder bar"]);
+
+const strongFood = hasStrongFoodEvidence({ hay, nutriments, categoriesTags, servingSize });
+if (!isClearlyBar && (hasCosmetic || hasHousehold || hasChemical) && !strongFood) {
+  return { isEdible: false, reason: "cosmetic/chemical/household product" };
+}
+
 
   let score = 0;
   if (/\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay)) score += 3;
