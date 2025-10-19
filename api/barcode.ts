@@ -28,33 +28,42 @@ function scalePerServing(valuePer100: any, servingSize: string | undefined) {
 /* -------------------------------------------------------------------------- */
 
 const BLOCK_COSMETIC = [
-  "sunscreen","spf","moisturizer","cleanser","serum","retinol","niacinamide",
-  "hyaluronic","cream","lotion","ointment","balm","mask","peel","exfoliant",
-  "skin","face","body","shampoo","conditioner","hair","deodorant","makeup",
-  "cosmetic","fragrance","perfume","aftershave","lipstick","lip balm"
+  "sunscreen","spf","sun screen","uv","broad spectrum","moisturizer","cleanser","serum",
+  "retinol","niacinamide","hyaluronic","cream","lotion","ointment","balm","mask","peel",
+  "exfoliant","skin","face","body","shampoo","conditioner","hair","deodorant","antiperspirant",
+  "makeup","cosmetic","fragrance","parfum","perfume","aftershave","lipstick","lip balm"
 ];
 const BLOCK_HOUSEHOLD = [
-  "detergent","bleach","disinfectant","cleaner","laundry","fabric softener",
-  "air freshener","insecticide","repellent","trash bag","foil","zip bag"
+  "detergent","bleach","disinfectant","cleaner","dishwashing","laundry","fabric softener",
+  "air freshener","insecticide","repellent","trash bag","aluminum foil","food wrap","zip bag"
 ];
 const BLOCK_CONTAINER = [
-  "refillable","reusable","stainless","plastic","metal","glass","flask","tumbler",
-  "thermos","bottle","container","jar","lid"
+  "refillable","reusable","stainless","plastic","metal","glass","flask","tumbler","thermos",
+  "water bottle","sports bottle","mug","container","jar","lid"
 ];
 const BLOCK_CHEMICAL = [
-  "benzene","sulfate","hydroxide","chloride","titanium dioxide",
+  "alcohol denat","benzene","sulfate","hydroxide","chloride","titanium dioxide",
   "zinc oxide","silicone","polyethylene","polypropyl","acrylate","copolymer"
 ];
 const PET_NONFOOD = ["cat litter","dog shampoo","flea","tick collar"];
+
+/* ✅ Expanded hints for foods, bars, powders, supplements */
 const FOOD_HINTS = [
-  "sugar","salt","wheat","rice","milk","cream","butter","egg","yeast","cocoa",
-  "chocolate","vanilla","flour","soy","peanut","almond","hazelnut","olive",
-  "sunflower","garlic","onion","tomato","apple","banana","strawberry","meat",
-  "fish","chicken","pasta","snack","chips","drink","bar","sauce","oil","bread"
+  "sugar","salt","wheat","rice","milk","cream","butter","egg","yeast","cocoa","chocolate",
+  "vanilla","flour","soy","peanut","almond","hazelnut","olive","sunflower","garlic","onion",
+  "tomato","apple","banana","strawberry","meat","fish","chicken","pasta","snack","chips",
+  "protein","bar","snack bar","protein bar","energy bar","granola","cereal","bread","oats"
 ];
+
+const SUPPLEMENT_HINTS = [
+  "powder","whey","casein","isolate","concentrate","mass gainer","gainer",
+  "collagen","pea protein","soy protein","plant protein",
+  "creatine","bcaa","branched chain amino acids","electrolyte","pre-workout","post-workout"
+];
+
 const BEVERAGE_HINTS = [
-  "drink","juice","water","soda","cola","energy drink","sports drink","tea",
-  "coffee","smoothie","beer","wine"
+  "drink","juice","water","mineral water","spring water","sparkling","soda","cola",
+  "energy drink","sports drink","tea","coffee","smoothie"
 ];
 
 function includesAny(s: string, arr: string[]) {
@@ -75,8 +84,10 @@ function plausibleNutrition(n: any): boolean {
 
 function isReusableContainer(name: string, categories: string) {
   const hay = `${name} ${categories}`.toLowerCase();
-  if (includesAny(hay, BLOCK_CONTAINER) && !includesAny(hay, ["bottled water","spring water","juice"])) {
-    return true;
+  if (hay.includes("water bottle") || includesAny(hay, BLOCK_CONTAINER)) {
+    if (!includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) {
+      return true;
+    }
   }
   return false;
 }
@@ -97,24 +108,30 @@ function guardEdible({
   const hay = [name, brand, categories, servingSize].join(" ").toLowerCase();
 
   if (includesAny(hay, PET_NONFOOD)) return { isEdible: false, reason: "pet product" };
-  if (includesAny(hay, BLOCK_HOUSEHOLD) || includesAny(hay, BLOCK_CHEMICAL))
-    return { isEdible: false, reason: "household/chemical product" };
+  if (includesAny(hay, BLOCK_COSMETIC) || includesAny(hay, BLOCK_HOUSEHOLD) || includesAny(hay, BLOCK_CHEMICAL))
+    return { isEdible: false, reason: "cosmetic/chemical/household product" };
   if (isReusableContainer(name, categories)) return { isEdible: false, reason: "reusable container" };
 
-  // Cosmetics are blocked only if no food clues exist
-  if (includesAny(hay, BLOCK_COSMETIC) && !includesAny(hay, FOOD_HINTS) && !includesAny(hay, BEVERAGE_HINTS))
-    return { isEdible: false, reason: "cosmetic product" };
-
-  // Build a confidence score
   let score = 0;
+
+  // ✅ Specific detection for protein/energy bars
+  if (/\b(protein|energy)\s*bar\b/.test(hay)) score += 3;
+
+  // ✅ Supplements and powders
+  if (includesAny(hay, SUPPLEMENT_HINTS)) score += 2;
+
   if (includesAny(hay, BEVERAGE_HINTS)) score += 2;
   if (includesAny(hay, FOOD_HINTS)) score += 2;
   if (plausibleNutrition(nutriments)) score += 3;
-  if (includesAny(hay, ["bottled water","spring water","mineral water"])) score += 2;
+  if (includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) score += 3;
   if (hay.includes("oil") && includesAny(hay, ["skin","hair","body","face"])) score -= 3;
   if (/\bspf\s?\d{1,3}\b/.test(hay)) score -= 4;
 
-  if (score >= 2) return { isEdible: true, reason: "sufficient edible evidence" };
+  // ✅ Supplements/powders can pass with slightly lower threshold
+  if (includesAny(hay, SUPPLEMENT_HINTS) && score >= 2)
+    return { isEdible: true, reason: "supplement/powder evidence" };
+
+  if (score >= 3) return { isEdible: true, reason: "sufficient edible evidence" };
   return { isEdible: false, reason: "insufficient edible evidence" };
 }
 
@@ -131,13 +148,26 @@ function buildCompleteNutrition(data: any = {}) {
       data.baseUnit === "ml" || data.baseUnit === "g" || data.baseUnit === "portion"
         ? data.baseUnit
         : "g",
-    calories: safeNum(data.calories),
     protein: safeNum(data.protein),
+    calories: safeNum(data.calories),
     carbs: safeNum(data.carbs ?? data.carbohydrates),
     fat: safeNum(data.fat),
+    vitaminA: safeNum(data.vitaminA),
+    vitaminC: safeNum(data.vitaminC),
+    vitaminD: safeNum(data.vitaminD),
+    vitaminE: safeNum(data.vitaminE),
+    vitaminK: safeNum(data.vitaminK),
+    vitaminB12: safeNum(data.vitaminB12),
+    iron: safeNum(data.iron),
+    calcium: safeNum(data.calcium),
+    magnesium: safeNum(data.magnesium),
+    zinc: safeNum(data.zinc),
+    water: safeNum(data.water),
+    sodium: safeNum(data.sodium),
+    potassium: safeNum(data.potassium),
+    chloride: safeNum(data.chloride),
     fiber: safeNum(data.fiber),
     sugar: safeNum(data.sugar),
-    sodium: safeNum(data.sodium),
   };
 }
 
@@ -166,7 +196,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     /* ------------------------------- 1) OpenFoodFacts ------------------------------ */
     const offResp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
     if (offResp.ok) {
-      const offData: any = await offResp.json(); // <-- cast to any to satisfy TS
+      const offData = await offResp.json();
       const p = offData?.product;
       if (p) {
         const name = p.product_name || "";
@@ -192,8 +222,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const servingSizeOut = servingRaw || "100 g";
         const baseUnit = servingRaw.includes("ml") ? "ml" : "g";
         const baseAmount = safeNum(servingSizeOut.match(/[\d.]+/)?.[0]) || 100;
-        const shouldScale = baseUnit === "ml" || baseUnit === "g";
 
+        const shouldScale = baseUnit === "ml" || baseUnit === "g";
         const fromOpenFoodFacts = {
           name,
           brand,
@@ -228,7 +258,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
 
       if (nutriResp.ok) {
-        const nutriData: any = await nutriResp.json(); // <-- cast to any
+        const nutriData = await nutriResp.json();
         const item = nutriData?.foods?.[0];
         if (item) {
           const name = item.food_name || "";
@@ -273,11 +303,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const systemPrompt = `You are a nutrition expert. Given a barcode number, deduce the most likely packaged edible product and provide estimated nutrition per serving.
 Respond ONLY with JSON including:
 - name, brand
-- servingSize (like "355 ml" or "50 g" or "1 portion")
+- servingSize (string like "355 ml" or "50 g" or "1 portion")
 - type: one of "liquid" | "solid" | "portion" | "unknown" | "non_food"
 - calories, protein, carbs, fat, fiber, sugar, sodium (integers)
 - source: "GPT-4o"
-If not edible, respond with {"error":"non_food","message":"Not an edible product."}`;
+If not edible, set {"error":"non_food","message":"Sorry, this product is not recognized as an edible item."}`;
 
     const gptResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -296,7 +326,7 @@ If not edible, respond with {"error":"non_food","message":"Not an edible product
       }),
     });
 
-    const gptJson: any = await gptResp.json(); // <-- cast to any
+    const gptJson = await gptResp.json();
     const content: string = gptJson?.choices?.[0]?.message?.content ?? "";
     const parsed = extractJsonFromText(content);
     if (parsed?.error === "non_food")
