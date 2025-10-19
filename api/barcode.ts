@@ -4,6 +4,46 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const NUTRITIONIX_APP_ID = process.env.NUTRITIONIX_APP_ID;
 const NUTRITIONIX_APP_KEY = process.env.NUTRITIONIX_APP_KEY;
 
+/* -------------------------------------------------------------------------- */
+/*                                Type Helpers                                */
+/* -------------------------------------------------------------------------- */
+interface OpenFoodFactsProduct {
+  product_name?: string;
+  brands?: string;
+  serving_size?: string;
+  categories_tags?: string[];
+  nutriments?: Record<string, any>;
+  generic_name?: string;
+  labels_tags?: string[];
+  quantity?: string;
+}
+
+interface OpenFoodFactsResponse {
+  product?: OpenFoodFactsProduct;
+}
+
+interface NutritionixItem {
+  food_name?: string;
+  brand_name?: string;
+  serving_qty?: number;
+  serving_unit?: string;
+  nf_calories?: number;
+  nf_protein?: number;
+  nf_total_carbohydrate?: number;
+  nf_total_fat?: number;
+  nf_dietary_fiber?: number;
+  nf_sugars?: number;
+  nf_sodium?: number;
+}
+
+interface NutritionixResponse {
+  foods?: NutritionixItem[];
+}
+
+interface OpenAIResponse {
+  choices?: { message?: { content?: string } }[];
+}
+
 /* ---------------------------- Shared type alias ---------------------------- */
 type ProductType = "liquid" | "solid" | "portion" | "unknown" | "non_food";
 
@@ -52,7 +92,8 @@ const FOOD_HINTS = [
   "sugar","salt","wheat","rice","milk","cream","butter","egg","yeast","cocoa","chocolate",
   "vanilla","flour","soy","peanut","almond","hazelnut","olive","sunflower","garlic","onion",
   "tomato","apple","banana","strawberry","meat","fish","chicken","pasta","snack","chips",
-  "protein","bar","snack bar","protein bar","energy bar","granola","cereal","bread","oats"
+  "protein","bar","snack bar","protein bar","energy bar","granola","cereal","bread","oats",
+  "builder" // builder bars (e.g., Clif Builder)
 ];
 
 const SUPPLEMENT_HINTS = [
@@ -66,9 +107,28 @@ const BEVERAGE_HINTS = [
   "energy drink","sports drink","tea","coffee","smoothie"
 ];
 
+/* OF openfoodfacts category/tag signals that are clearly edible */
+const FOOD_CATEGORY_TAG_HINTS = [
+  "en:snacks",
+  "en:snack-bars",
+  "en:protein-bars",
+  "en:nutrition-bars",
+  "en:protein-supplements",
+  "en:breakfast-cereals",
+  "en:confectioneries",
+  "en:beverages",
+  "en:meals",
+];
+
 function includesAny(s: string, arr: string[]) {
   const x = s.toLowerCase();
   return arr.some(w => x.includes(w));
+}
+
+function arrayIncludesAny(arr: string[] | undefined, needles: string[]) {
+  if (!arr || arr.length === 0) return false;
+  const lower = arr.map(x => x.toLowerCase());
+  return needles.some(n => lower.some(tag => tag.includes(n)));
 }
 
 function plausibleNutrition(n: any): boolean {
@@ -92,44 +152,86 @@ function isReusableContainer(name: string, categories: string) {
   return false;
 }
 
+function hasStrongFoodEvidence({
+  hay,
+  nutriments,
+  categoriesTags,
+  servingSize,
+}: {
+  hay: string;
+  nutriments: any;
+  categoriesTags?: string[];
+  servingSize?: string;
+}) {
+  const hasBarRegex = /\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay);
+  const hasFoodWords =
+    includesAny(hay, FOOD_HINTS) ||
+    includesAny(hay, SUPPLEMENT_HINTS) ||
+    includesAny(hay, BEVERAGE_HINTS) ||
+    includesAny(hay, ["bar", "snack", "nutrition bar"]); // broad catch
+  const hasFoodCats = arrayIncludesAny(categoriesTags, FOOD_CATEGORY_TAG_HINTS);
+  const hasUnits = !!servingSize?.match(/\b(\d+(\.\d+)?)\s*(g|ml)\b/i);
+  const hasMacros = plausibleNutrition(nutriments);
+  return hasBarRegex || hasFoodWords || hasFoodCats || hasUnits || hasMacros;
+}
+
 function guardEdible({
   name = "",
   brand = "",
   categories = "",
+  categoriesTags = [],
   servingSize = "",
   nutriments = undefined,
 }: {
   name?: string;
   brand?: string;
   categories?: string;
+  categoriesTags?: string[];
   servingSize?: string;
   nutriments?: any;
 }): { isEdible: boolean; reason: string } {
   const hay = [name, brand, categories, servingSize].join(" ").toLowerCase();
 
+  // Hard blocks that should always trigger
   if (includesAny(hay, PET_NONFOOD)) return { isEdible: false, reason: "pet product" };
-  if (includesAny(hay, BLOCK_COSMETIC) || includesAny(hay, BLOCK_HOUSEHOLD) || includesAny(hay, BLOCK_CHEMICAL))
+  if (isReusableContainer(name, categories || "")) return { isEdible: false, reason: "reusable container" };
+
+  // Context-aware cosmetic/chemical/household block:
+  // Only block if NO strong food evidence exists.
+  const hasCosmetic = includesAny(hay, BLOCK_COSMETIC);
+  const hasHousehold = includesAny(hay, BLOCK_HOUSEHOLD);
+  const hasChemical = includesAny(hay, BLOCK_CHEMICAL);
+
+  const strongFood = hasStrongFoodEvidence({ hay, nutriments, categoriesTags, servingSize });
+
+  if ((hasCosmetic || hasHousehold || hasChemical) && !strongFood) {
     return { isEdible: false, reason: "cosmetic/chemical/household product" };
-  if (isReusableContainer(name, categories)) return { isEdible: false, reason: "reusable container" };
+  }
 
   let score = 0;
 
-  // ✅ Specific detection for protein/energy bars
-  if (/\b(protein|energy)\s*bar\b/.test(hay)) score += 3;
+  // Strong bar signals
+  if (/\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay)) score += 3;
 
-  // ✅ Supplements and powders
+  // Supplements and powders
   if (includesAny(hay, SUPPLEMENT_HINTS)) score += 2;
 
   if (includesAny(hay, BEVERAGE_HINTS)) score += 2;
   if (includesAny(hay, FOOD_HINTS)) score += 2;
   if (plausibleNutrition(nutriments)) score += 3;
+  if (arrayIncludesAny(categoriesTags, FOOD_CATEGORY_TAG_HINTS)) score += 3;
+
   if (includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) score += 3;
   if (hay.includes("oil") && includesAny(hay, ["skin","hair","body","face"])) score -= 3;
   if (/\bspf\s?\d{1,3}\b/.test(hay)) score -= 4;
 
-  // ✅ Supplements/powders can pass with slightly lower threshold
+  // Allow supplements/powders on lower evidence
   if (includesAny(hay, SUPPLEMENT_HINTS) && score >= 2)
     return { isEdible: true, reason: "supplement/powder evidence" };
+
+  // Allow bars/snacks on modest evidence
+  if ((/\b(bar|snack|nutrition)\b/.test(hay) || arrayIncludesAny(categoriesTags, ["en:snack-bars","en:protein-bars","en:nutrition-bars"])) && score >= 2)
+    return { isEdible: true, reason: "bar/snack evidence" };
 
   if (score >= 3) return { isEdible: true, reason: "sufficient edible evidence" };
   return { isEdible: false, reason: "insufficient edible evidence" };
@@ -196,16 +298,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     /* ------------------------------- 1) OpenFoodFacts ------------------------------ */
     const offResp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
     if (offResp.ok) {
-      const offData = await offResp.json();
+      const offData: OpenFoodFactsResponse = await offResp.json();
       const p = offData?.product;
       if (p) {
-        const name = p.product_name || "";
+        const name = p.product_name || p.generic_name || "";
         const brand = p.brands || "";
         const servingRaw = p.serving_size || "";
-        const categoriesText = (p.categories_tags || []).join(", ");
+        const categoriesTags = p.categories_tags || [];
+        const categoriesText = categoriesTags.join(", ");
         const n = p.nutriments || {};
 
-        const guard = guardEdible({ name, brand, categories: categoriesText, servingSize: servingRaw, nutriments: n });
+        const guard = guardEdible({
+          name,
+          brand,
+          categories: categoriesText,
+          categoriesTags,
+          servingSize: servingRaw,
+          nutriments: n
+        });
         if (!guard.isEdible)
           return res.status(200).json({ error: "non_food", message: guard.reason });
 
@@ -220,7 +330,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           : undefined;
 
         const servingSizeOut = servingRaw || "100 g";
-        const baseUnit = servingRaw.includes("ml") ? "ml" : "g";
+        const baseUnit = servingSizeOut.includes("ml") ? "ml" : "g";
         const baseAmount = safeNum(servingSizeOut.match(/[\d.]+/)?.[0]) || 100;
 
         const shouldScale = baseUnit === "ml" || baseUnit === "g";
@@ -258,14 +368,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
 
       if (nutriResp.ok) {
-        const nutriData = await nutriResp.json();
+        const nutriData: NutritionixResponse = await nutriResp.json();
         const item = nutriData?.foods?.[0];
         if (item) {
           const name = item.food_name || "";
           const brand = item.brand_name || "";
           const servingStr = `${item.serving_qty || 1} ${item.serving_unit || "portion"}`;
           const guard = guardEdible({
-            name, brand, categories: "", servingSize: servingStr, nutriments: {
+            name, brand, categories: "", categoriesTags: [], servingSize: servingStr, nutriments: {
               "energy-kcal_100g": item.nf_calories,
               proteins_100g: item.nf_protein,
               carbohydrates_100g: item.nf_total_carbohydrate,
@@ -326,7 +436,7 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
       }),
     });
 
-    const gptJson = await gptResp.json();
+    const gptJson: OpenAIResponse = await gptResp.json();
     const content: string = gptJson?.choices?.[0]?.message?.content ?? "";
     const parsed = extractJsonFromText(content);
     if (parsed?.error === "non_food")
@@ -335,6 +445,8 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
     const guard = guardEdible({
       name: parsed?.name,
       brand: parsed?.brand,
+      categories: "",
+      categoriesTags: [],
       servingSize: parsed?.servingSize,
       nutriments: {
         "energy-kcal_100g": parsed?.calories,
