@@ -16,6 +16,7 @@ interface OpenFoodFactsProduct {
   generic_name?: string;
   labels_tags?: string[];
   quantity?: string;
+  ingredients_text?: string;
 }
 
 interface OpenFoodFactsResponse {
@@ -92,8 +93,7 @@ const FOOD_HINTS = [
   "sugar","salt","wheat","rice","milk","cream","butter","egg","yeast","cocoa","chocolate",
   "vanilla","flour","soy","peanut","almond","hazelnut","olive","sunflower","garlic","onion",
   "tomato","apple","banana","strawberry","meat","fish","chicken","pasta","snack","chips",
-  "protein","bar","snack bar","protein bar","energy bar","granola","cereal","bread","oats",
-  "builder" // builder bars (e.g., Clif Builder)
+  "protein","bar","snack bar","protein bar","energy bar","granola","cereal","bread","oats","builder"
 ];
 
 const SUPPLEMENT_HINTS = [
@@ -107,30 +107,20 @@ const BEVERAGE_HINTS = [
   "energy drink","sports drink","tea","coffee","smoothie"
 ];
 
-/* OF openfoodfacts category/tag signals that are clearly edible */
 const FOOD_CATEGORY_TAG_HINTS = [
-  "en:snacks",
-  "en:snack-bars",
-  "en:protein-bars",
-  "en:nutrition-bars",
-  "en:protein-supplements",
-  "en:breakfast-cereals",
-  "en:confectioneries",
-  "en:beverages",
-  "en:meals",
+  "en:snacks","en:snack-bars","en:protein-bars","en:nutrition-bars",
+  "en:protein-supplements","en:breakfast-cereals","en:beverages","en:meals"
 ];
 
 function includesAny(s: string, arr: string[]) {
   const x = s.toLowerCase();
   return arr.some(w => x.includes(w));
 }
-
 function arrayIncludesAny(arr: string[] | undefined, needles: string[]) {
   if (!arr || arr.length === 0) return false;
   const lower = arr.map(x => x.toLowerCase());
   return needles.some(n => lower.some(tag => tag.includes(n)));
 }
-
 function plausibleNutrition(n: any): boolean {
   if (!n) return false;
   const vals = [
@@ -141,7 +131,6 @@ function plausibleNutrition(n: any): boolean {
   ].filter(Number.isFinite);
   return vals.some(v => v > 0);
 }
-
 function isReusableContainer(name: string, categories: string) {
   const hay = `${name} ${categories}`.toLowerCase();
   if (hay.includes("water bottle") || includesAny(hay, BLOCK_CONTAINER)) {
@@ -151,24 +140,15 @@ function isReusableContainer(name: string, categories: string) {
   }
   return false;
 }
-
 function hasStrongFoodEvidence({
-  hay,
-  nutriments,
-  categoriesTags,
-  servingSize,
-}: {
-  hay: string;
-  nutriments: any;
-  categoriesTags?: string[];
-  servingSize?: string;
-}) {
+  hay, nutriments, categoriesTags, servingSize,
+}: { hay: string; nutriments: any; categoriesTags?: string[]; servingSize?: string; }) {
   const hasBarRegex = /\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay);
   const hasFoodWords =
     includesAny(hay, FOOD_HINTS) ||
     includesAny(hay, SUPPLEMENT_HINTS) ||
     includesAny(hay, BEVERAGE_HINTS) ||
-    includesAny(hay, ["bar", "snack", "nutrition bar"]); // broad catch
+    includesAny(hay, ["bar","snack","nutrition bar"]);
   const hasFoodCats = arrayIncludesAny(categoriesTags, FOOD_CATEGORY_TAG_HINTS);
   const hasUnits = !!servingSize?.match(/\b(\d+(\.\d+)?)\s*(g|ml)\b/i);
   const hasMacros = plausibleNutrition(nutriments);
@@ -176,63 +156,38 @@ function hasStrongFoodEvidence({
 }
 
 function guardEdible({
-  name = "",
-  brand = "",
-  categories = "",
-  categoriesTags = [],
-  servingSize = "",
-  nutriments = undefined,
+  name = "", brand = "", categories = "", categoriesTags = [],
+  servingSize = "", nutriments = undefined,
 }: {
-  name?: string;
-  brand?: string;
-  categories?: string;
-  categoriesTags?: string[];
-  servingSize?: string;
-  nutriments?: any;
+  name?: string; brand?: string; categories?: string; categoriesTags?: string[];
+  servingSize?: string; nutriments?: any;
 }): { isEdible: boolean; reason: string } {
   const hay = [name, brand, categories, servingSize].join(" ").toLowerCase();
-
-  // Hard blocks that should always trigger
   if (includesAny(hay, PET_NONFOOD)) return { isEdible: false, reason: "pet product" };
   if (isReusableContainer(name, categories || "")) return { isEdible: false, reason: "reusable container" };
 
-  // Context-aware cosmetic/chemical/household block:
-  // Only block if NO strong food evidence exists.
   const hasCosmetic = includesAny(hay, BLOCK_COSMETIC);
   const hasHousehold = includesAny(hay, BLOCK_HOUSEHOLD);
   const hasChemical = includesAny(hay, BLOCK_CHEMICAL);
-
   const strongFood = hasStrongFoodEvidence({ hay, nutriments, categoriesTags, servingSize });
-
-  if ((hasCosmetic || hasHousehold || hasChemical) && !strongFood) {
+  if ((hasCosmetic || hasHousehold || hasChemical) && !strongFood)
     return { isEdible: false, reason: "cosmetic/chemical/household product" };
-  }
 
   let score = 0;
-
-  // Strong bar signals
   if (/\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay)) score += 3;
-
-  // Supplements and powders
   if (includesAny(hay, SUPPLEMENT_HINTS)) score += 2;
-
   if (includesAny(hay, BEVERAGE_HINTS)) score += 2;
   if (includesAny(hay, FOOD_HINTS)) score += 2;
   if (plausibleNutrition(nutriments)) score += 3;
   if (arrayIncludesAny(categoriesTags, FOOD_CATEGORY_TAG_HINTS)) score += 3;
-
   if (includesAny(hay, ["bottled water","spring water","mineral water","drinking water"])) score += 3;
   if (hay.includes("oil") && includesAny(hay, ["skin","hair","body","face"])) score -= 3;
   if (/\bspf\s?\d{1,3}\b/.test(hay)) score -= 4;
 
-  // Allow supplements/powders on lower evidence
   if (includesAny(hay, SUPPLEMENT_HINTS) && score >= 2)
     return { isEdible: true, reason: "supplement/powder evidence" };
-
-  // Allow bars/snacks on modest evidence
-  if ((/\b(bar|snack|nutrition)\b/.test(hay) || arrayIncludesAny(categoriesTags, ["en:snack-bars","en:protein-bars","en:nutrition-bars"])) && score >= 2)
+  if ((/\b(bar|snack|nutrition)\b/.test(hay) || arrayIncludesAny(categoriesTags, ["en:snack-bars","en:protein-bars"])) && score >= 2)
     return { isEdible: true, reason: "bar/snack evidence" };
-
   if (score >= 3) return { isEdible: true, reason: "sufficient edible evidence" };
   return { isEdible: false, reason: "insufficient edible evidence" };
 }
@@ -248,8 +203,7 @@ function buildCompleteNutrition(data: any = {}) {
     baseAmount: safeNum(data.baseAmount),
     baseUnit:
       data.baseUnit === "ml" || data.baseUnit === "g" || data.baseUnit === "portion"
-        ? data.baseUnit
-        : "g",
+        ? data.baseUnit : "g",
     protein: safeNum(data.protein),
     calories: safeNum(data.calories),
     carbs: safeNum(data.carbs ?? data.carbohydrates),
@@ -272,17 +226,12 @@ function buildCompleteNutrition(data: any = {}) {
     sugar: safeNum(data.sugar),
   };
 }
-
 function extractJsonFromText(text: string): any | null {
   if (!text) return null;
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenceMatch?.[1]) {
-    try { return JSON.parse(fenceMatch[1]); } catch {}
-  }
+  if (fenceMatch?.[1]) try { return JSON.parse(fenceMatch[1]); } catch {}
   const objMatch = text.match(/\{[\s\S]*\}/);
-  if (objMatch) {
-    try { return JSON.parse(objMatch[0]); } catch {}
-  }
+  if (objMatch) try { return JSON.parse(objMatch[0]); } catch {}
   return null;
 }
 
@@ -307,11 +256,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const categoriesTags = p.categories_tags || [];
         const categoriesText = categoriesTags.join(", ");
         const n = p.nutriments || {};
+        const ingredients = p.ingredients_text || "";
+        const labels = (p.labels_tags || []).join(", ");
+
+        // richer context for guard (so “zinc oxide” doesn’t dominate)
+        const extraContext = `${categoriesText} ${ingredients} ${labels}`;
 
         const guard = guardEdible({
           name,
           brand,
-          categories: categoriesText,
+          categories: extraContext,
           categoriesTags,
           servingSize: servingRaw,
           nutriments: n
@@ -326,22 +280,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const fiberPer100 = n.fiber_100g;
         const sugarsPer100 = n.sugars_100g;
         const sodiumPer100Mg = Number.isFinite(n.sodium_100g)
-          ? n.sodium_100g * 1000
-          : undefined;
+          ? n.sodium_100g * 1000 : undefined;
 
         const servingSizeOut = servingRaw || "100 g";
         const baseUnit = servingSizeOut.includes("ml") ? "ml" : "g";
         const baseAmount = safeNum(servingSizeOut.match(/[\d.]+/)?.[0]) || 100;
-
         const shouldScale = baseUnit === "ml" || baseUnit === "g";
+
         const fromOpenFoodFacts = {
-          name,
-          brand,
-          source: "OpenFoodFacts",
+          name, brand, source: "OpenFoodFacts",
           type: baseUnit === "ml" ? "liquid" : "solid",
-          servingSize: servingSizeOut,
-          baseAmount,
-          baseUnit,
+          servingSize: servingSizeOut, baseAmount, baseUnit,
           calories: shouldScale ? scalePerServing(caloriesPer100, servingSizeOut) : safeNum(caloriesPer100),
           protein: shouldScale ? scalePerServing(proteinPer100, servingSizeOut) : safeNum(proteinPer100),
           carbs: shouldScale ? scalePerServing(carbsPer100, servingSizeOut) : safeNum(carbsPer100),
@@ -350,7 +299,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           sugar: shouldScale ? scalePerServing(sugarsPer100, servingSizeOut) : safeNum(sugarsPer100),
           sodium: shouldScale ? scalePerServing(sodiumPer100Mg, servingSizeOut) : safeNum(sodiumPer100Mg),
         };
-
         return res.status(200).json(buildCompleteNutrition(fromOpenFoodFacts));
       }
     }
@@ -366,7 +314,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         },
         body: JSON.stringify({ upc: barcode }),
       });
-
       if (nutriResp.ok) {
         const nutriData: NutritionixResponse = await nutriResp.json();
         const item = nutriData?.foods?.[0];
@@ -386,20 +333,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             return res.status(200).json({ error: "non_food", message: guard.reason });
 
           const fromNutritionix = {
-            name,
-            brand,
-            source: "Nutritionix",
-            type: "solid",
-            servingSize: servingStr,
-            baseAmount: safeNum(item.serving_qty),
+            name, brand, source: "Nutritionix", type: "solid",
+            servingSize: servingStr, baseAmount: safeNum(item.serving_qty),
             baseUnit: item.serving_unit || "portion",
-            calories: item.nf_calories,
-            protein: item.nf_protein,
-            carbs: item.nf_total_carbohydrate,
-            fat: item.nf_total_fat,
-            fiber: item.nf_dietary_fiber,
-            sugar: item.nf_sugars,
-            sodium: item.nf_sodium,
+            calories: item.nf_calories, protein: item.nf_protein,
+            carbs: item.nf_total_carbohydrate, fat: item.nf_total_fat,
+            fiber: item.nf_dietary_fiber, sugar: item.nf_sugars, sodium: item.nf_sodium,
           };
           return res.status(200).json(buildCompleteNutrition(fromNutritionix));
         }
@@ -459,20 +398,20 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
       return res.status(200).json({ error: "non_food", message: guard.reason });
 
     const fromGpt = {
-      name: parsed.name,
-      brand: parsed.brand,
+      name: parsed?.name,
+      brand: parsed?.brand,
       source: "GPT-4o",
-      type: parsed.type,
-      servingSize: parsed.servingSize,
-      baseAmount: safeNum(parsed.baseAmount) || 100,
-      baseUnit: parsed.baseUnit || "g",
-      calories: parsed.calories,
-      protein: parsed.protein,
-      carbs: parsed.carbs,
-      fat: parsed.fat,
-      fiber: parsed.fiber,
-      sugar: parsed.sugar,
-      sodium: parsed.sodium,
+      type: parsed?.type,
+      servingSize: parsed?.servingSize,
+      baseAmount: safeNum(parsed?.baseAmount) || 100,
+      baseUnit: parsed?.baseUnit || "g",
+      calories: parsed?.calories,
+      protein: parsed?.protein,
+      carbs: parsed?.carbs,
+      fat: parsed?.fat,
+      fiber: parsed?.fiber,
+      sugar: parsed?.sugar,
+      sodium: parsed?.sodium,
     };
     return res.status(200).json(buildCompleteNutrition(fromGpt));
   } catch (err: any) {
