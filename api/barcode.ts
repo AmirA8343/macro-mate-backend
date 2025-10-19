@@ -18,11 +18,9 @@ interface OpenFoodFactsProduct {
   quantity?: string;
   ingredients_text?: string;
 }
-
 interface OpenFoodFactsResponse {
   product?: OpenFoodFactsProduct;
 }
-
 interface NutritionixItem {
   food_name?: string;
   brand_name?: string;
@@ -36,11 +34,9 @@ interface NutritionixItem {
   nf_sugars?: number;
   nf_sodium?: number;
 }
-
 interface NutritionixResponse {
   foods?: NutritionixItem[];
 }
-
 interface OpenAIResponse {
   choices?: { message?: { content?: string } }[];
 }
@@ -259,7 +255,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const ingredients = p.ingredients_text || "";
         const labels = (p.labels_tags || []).join(", ");
 
-        // richer context for guard (so “zinc oxide” doesn’t dominate)
         const extraContext = `${categoriesText} ${ingredients} ${labels}`;
 
         const guard = guardEdible({
@@ -349,14 +344,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!OPENAI_API_KEY)
       return res.status(500).json({ error: "Missing OpenAI API key" });
 
-    const systemPrompt = `You are a nutrition expert. Given a barcode number, deduce the most likely packaged edible product and provide estimated nutrition per serving.
-Respond ONLY with JSON including:
-- name, brand
-- servingSize (string like "355 ml" or "50 g" or "1 portion")
-- type: one of "liquid" | "solid" | "portion" | "unknown" | "non_food"
-- calories, protein, carbs, fat, fiber, sugar, sodium (integers)
-- source: "GPT-4o"
-If not edible, set {"error":"non_food","message":"Sorry, this product is not recognized as an edible item."}`;
+    const systemPrompt = `
+You are a nutrition data assistant with access to knowledge of common UPC patterns, Nutritionix-style entries, and OpenFoodFacts categories.
+Given a barcode, your job is to return the most plausible *packaged food or drink* sold in North America.
+Do NOT guess cosmetics, household, or chemical items.
+
+If the code looks like a protein bar, energy drink, peanut butter, or similar, prefer those.
+If the barcode cannot be identified at all, respond with:
+{"error":"non_food","message":"Unknown or invalid barcode"}.
+
+Respond ONLY with JSON containing:
+{
+  "name": "string",
+  "brand": "string",
+  "servingSize": "string",
+  "type": "liquid" | "solid" | "portion" | "unknown" | "non_food",
+  "calories": 0,
+  "protein": 0,
+  "carbs": 0,
+  "fat": 0,
+  "fiber": 0,
+  "sugar": 0,
+  "sodium": 0,
+  "source": "GPT-4o"
+}
+`;
 
     const gptResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -380,6 +392,8 @@ If not edible, set {"error":"non_food","message":"Sorry, this product is not rec
     const parsed = extractJsonFromText(content);
     if (parsed?.error === "non_food")
       return res.status(200).json(parsed);
+    if (!parsed)
+      return res.status(200).json({ error: "parse_error", raw: content ?? "" });
 
     const guard = guardEdible({
       name: parsed?.name,
