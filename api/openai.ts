@@ -1,4 +1,4 @@
-// api/nutrition.ts
+// api/openai
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
