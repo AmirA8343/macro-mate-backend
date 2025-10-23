@@ -176,7 +176,6 @@ if (!isClearlyBar && (hasCosmetic || hasHousehold || hasChemical) && !strongFood
   return { isEdible: false, reason: "cosmetic/chemical/household product" };
 }
 
-
   let score = 0;
   if (/\b(protein|energy|nutrition|builder)\s*bar\b/.test(hay)) score += 3;
   if (includesAny(hay, SUPPLEMENT_HINTS)) score += 2;
