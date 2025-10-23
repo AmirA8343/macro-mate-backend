@@ -4,7 +4,9 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const NUTRITIONIX_APP_ID = process.env.NUTRITIONIX_APP_ID!;
 const NUTRITIONIX_APP_KEY = process.env.NUTRITIONIX_APP_KEY!;
 
-/* ---------- helpers ---------- */
+/* -------------------------------------------------------------------------- */
+/*                                   Helpers                                  */
+/* -------------------------------------------------------------------------- */
 const safeNum = (v: any) => (Number.isFinite(+v) ? Math.round(+v) : 0);
 const buildCompleteNutrition = (d: any = {}) => ({
   protein: safeNum(d.protein),
@@ -39,8 +41,14 @@ const extractJson = (text: string) => {
   return null;
 };
 
-/* ---------- Response Types ---------- */
-interface NutritionixResponse {
+/* -------------------------------------------------------------------------- */
+/*                               Type Definitions                             */
+/* -------------------------------------------------------------------------- */
+interface NutritionixInstantResponse {
+  branded?: { nix_item_id?: string; food_name?: string }[];
+}
+
+interface NutritionixItemResponse {
   foods?: {
     nf_calories?: number;
     nf_protein?: number;
@@ -68,10 +76,12 @@ interface OpenAIResponse {
   choices?: { message?: { content?: string } }[];
 }
 
-/* ---------- Nutritionix ---------- */
-async function fetchNutritionix(query: string) {
+/* -------------------------------------------------------------------------- */
+/*                             Nutritionix Instant                            */
+/* -------------------------------------------------------------------------- */
+async function fetchNutritionixInstant(query: string) {
   try {
-    const resp = await fetch("https://trackapi.nutritionix.com/v2/natural/nutrients", {
+    const resp = await fetch("https://trackapi.nutritionix.com/v2/search/instant", {
       method: "POST",
       headers: {
         "x-app-id": NUTRITIONIX_APP_ID,
@@ -82,12 +92,24 @@ async function fetchNutritionix(query: string) {
     });
     if (!resp.ok) return null;
 
-    const data = (await resp.json()) as NutritionixResponse; // ✅ explicit cast
-    const item = data.foods?.[0];
+    const data = (await resp.json()) as NutritionixInstantResponse;
+    const branded = data?.branded?.[0];
+    if (!branded?.nix_item_id) return null;
+
+    const detailResp = await fetch(`https://trackapi.nutritionix.com/v2/search/item?nix_item_id=${branded.nix_item_id}`, {
+      headers: {
+        "x-app-id": NUTRITIONIX_APP_ID,
+        "x-app-key": NUTRITIONIX_APP_KEY,
+      },
+    });
+    if (!detailResp.ok) return null;
+
+    const detailData = (await detailResp.json()) as NutritionixItemResponse;
+    const item = detailData?.foods?.[0];
     if (!item) return null;
 
     return {
-      source: "Nutritionix",
+      source: "Nutritionix Branded",
       calories: safeNum(item.nf_calories),
       protein: safeNum(item.nf_protein),
       carbs: safeNum(item.nf_total_carbohydrate),
@@ -100,20 +122,53 @@ async function fetchNutritionix(query: string) {
   }
 }
 
-/* ---------- OpenFoodFacts ---------- */
+/* -------------------------------------------------------------------------- */
+/*                             Nutritionix Natural                            */
+/* -------------------------------------------------------------------------- */
+async function fetchNutritionixNatural(query: string) {
+  try {
+    const resp = await fetch("https://trackapi.nutritionix.com/v2/natural/nutrients", {
+      method: "POST",
+      headers: {
+        "x-app-id": NUTRITIONIX_APP_ID,
+        "x-app-key": NUTRITIONIX_APP_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    });
+    if (!resp.ok) return null;
+
+    const data = (await resp.json()) as NutritionixItemResponse;
+    const item = data?.foods?.[0];
+    if (!item) return null;
+
+    return {
+      source: "Nutritionix Natural",
+      calories: safeNum(item.nf_calories),
+      protein: safeNum(item.nf_protein),
+      carbs: safeNum(item.nf_total_carbohydrate),
+      fat: safeNum(item.nf_total_fat),
+      sodium: safeNum(item.nf_sodium),
+      fiber: safeNum(item.nf_dietary_fiber),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                               OpenFoodFacts                                */
+/* -------------------------------------------------------------------------- */
 async function fetchOpenFoodFacts(query: string) {
   try {
     const resp = await fetch(
-      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
-        query
-      )}&search_simple=1&json=1&page_size=1`
+      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&json=1&page_size=1`
     );
     if (!resp.ok) return null;
 
-    const data = (await resp.json()) as OpenFoodFactsResponse; // ✅ explicit cast
-    const p = data.products?.[0];
+    const data = (await resp.json()) as OpenFoodFactsResponse;
+    const p = data?.products?.[0];
     const n = p?.nutriments || {};
-
     if (!n["energy-kcal_100g"]) return null;
 
     return {
@@ -130,34 +185,29 @@ async function fetchOpenFoodFacts(query: string) {
   }
 }
 
-/* ---------- main handler ---------- */
+/* -------------------------------------------------------------------------- */
+/*                                  Handler                                   */
+/* -------------------------------------------------------------------------- */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
   const { description = "", photoUrl } = req.body || {};
   if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OpenAI key" });
 
   try {
-    // --- Stage 1: identify foods & portions ---
+    /* ---------- Stage 1: Identify foods (GPT-4o Vision) ---------- */
     const stage1Prompt = `
-You are a nutrition analyst. Identify every edible item and estimate portion.
-Return STRICT JSON:
-
+You are a nutrition analyst. Identify all edible items and portion sizes from the given text and image.
+Return STRICT JSON only:
 {
-  "foods": [
-    {"name": "string", "portion_text": "e.g. 150 g or 1 cup", "confidence": 0.0-1.0}
-  ],
+  "foods": [{"name":"string","portion_text":"e.g. 150 g or 1 cup"}],
   "summary": "short human summary"
 }
-
-Do not calculate calories or macros.
 `;
 
     const stage1Msgs: any[] = [
       { role: "system", content: stage1Prompt },
       { role: "user", content: description || "(no description)" },
     ];
-
     if (photoUrl) {
       stage1Msgs.push({
         role: "user",
@@ -171,21 +221,23 @@ Do not calculate calories or macros.
     const stage1Resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: stage1Msgs, temperature: 0 }),
+      body: JSON.stringify({ model: "gpt-4o", messages: stage1Msgs, temperature: 0 }),
     });
 
-    const stage1Data = (await stage1Resp.json()) as OpenAIResponse; // ✅ explicit cast
-    const stage1Content = stage1Data.choices?.[0]?.message?.content ?? "";
-    const stage1 = extractJson(stage1Content) ?? { foods: [] as { name: string; portion_text: string }[] };
+    const stage1Data = (await stage1Resp.json()) as OpenAIResponse;
+    const stage1Content = stage1Data?.choices?.[0]?.message?.content ?? "";
+    const stage1 = extractJson(stage1Content) ?? { foods: [] };
 
-    // --- Stage 1.5: gather verified macros from APIs ---
-    const foodList = stage1.foods?.map((f) => `${f.portion_text || ""} ${f.name}`) || [];
+    /* ---------- Stage 1.5: Manager (databases) ---------- */
+    const foodList = stage1.foods?.map((f: any) => `${f.portion_text || ""} ${f.name}`) || [];
     const verified = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 };
 
     for (const item of foodList) {
-      const nx = await fetchNutritionix(item);
-      const off = !nx ? await fetchOpenFoodFacts(item) : null;
-      const source = nx || off;
+      const branded = await fetchNutritionixInstant(item);
+      const generic = !branded ? await fetchNutritionixNatural(item) : null;
+      const off = !branded && !generic ? await fetchOpenFoodFacts(item) : null;
+      const source = branded || generic || off;
+
       if (source) {
         verified.calories += source.calories || 0;
         verified.protein += source.protein || 0;
@@ -196,15 +248,16 @@ Do not calculate calories or macros.
       }
     }
 
-    // --- Stage 2: AI refinement ---
+    /* ---------- Stage 2: AI Refinement ---------- */
     const stage2Prompt = `
-You are an expert dietitian. Given the verified macros from databases and meal items, fill missing micronutrients realistically.
-If unknown, use 0. Double-check that totals are realistic (not >2000 kcal per meal).
-Return JSON only with:
-protein (g), calories (kcal), carbs (g), fat (g),
-vitaminA (µg), vitaminC (mg), vitaminD (µg), vitaminE (mg), vitaminK (µg), vitaminB12 (µg),
-iron (mg), calcium (mg), magnesium (mg), zinc (mg),
-water (ml), sodium (mg), potassium (mg), chloride (mg), fiber (g).
+You are an expert dietitian. Given verified database totals and the food list, fill missing micronutrients realistically.
+Ensure totals are plausible (<2000 kcal per meal). Respond with one JSON only:
+{
+  "protein":0,"calories":0,"carbs":0,"fat":0,
+  "vitaminA":0,"vitaminC":0,"vitaminD":0,"vitaminE":0,"vitaminK":0,"vitaminB12":0,
+  "iron":0,"calcium":0,"magnesium":0,"zinc":0,
+  "water":0,"sodium":0,"potassium":0,"chloride":0,"fiber":0
+}
 
 Database verified totals:
 ${JSON.stringify(verified)}
@@ -217,15 +270,15 @@ ${JSON.stringify(foodList)}
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         messages: [{ role: "system", content: stage2Prompt }],
         temperature: 0,
         max_tokens: 800,
       }),
     });
 
-    const stage2Data = (await stage2Resp.json()) as OpenAIResponse; // ✅ explicit cast
-    const stage2Content = stage2Data.choices?.[0]?.message?.content ?? "";
+    const stage2Data = (await stage2Resp.json()) as OpenAIResponse;
+    const stage2Content = stage2Data?.choices?.[0]?.message?.content ?? "";
     const parsed = extractJson(stage2Content);
 
     if (parsed) return res.status(200).json(buildCompleteNutrition(parsed));
