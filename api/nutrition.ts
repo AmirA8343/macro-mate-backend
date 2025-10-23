@@ -8,6 +8,7 @@ const NUTRITIONIX_APP_KEY = process.env.NUTRITIONIX_APP_KEY!;
 /*                                   Helpers                                  */
 /* -------------------------------------------------------------------------- */
 const safeNum = (v: any) => (Number.isFinite(+v) ? Math.round(+v) : 0);
+
 const buildCompleteNutrition = (d: any = {}) => ({
   protein: safeNum(d.protein),
   calories: safeNum(d.calories),
@@ -47,7 +48,6 @@ const extractJson = (text: string) => {
 interface NutritionixInstantResponse {
   branded?: { nix_item_id?: string; food_name?: string }[];
 }
-
 interface NutritionixItemResponse {
   foods?: {
     nf_calories?: number;
@@ -58,7 +58,6 @@ interface NutritionixItemResponse {
     nf_dietary_fiber?: number;
   }[];
 }
-
 interface OpenFoodFactsResponse {
   products?: {
     nutriments?: {
@@ -71,7 +70,6 @@ interface OpenFoodFactsResponse {
     };
   }[];
 }
-
 interface OpenAIResponse {
   choices?: { message?: { content?: string } }[];
 }
@@ -96,12 +94,15 @@ async function fetchNutritionixInstant(query: string) {
     const branded = data?.branded?.[0];
     if (!branded?.nix_item_id) return null;
 
-    const detailResp = await fetch(`https://trackapi.nutritionix.com/v2/search/item?nix_item_id=${branded.nix_item_id}`, {
-      headers: {
-        "x-app-id": NUTRITIONIX_APP_ID,
-        "x-app-key": NUTRITIONIX_APP_KEY,
-      },
-    });
+    const detailResp = await fetch(
+      `https://trackapi.nutritionix.com/v2/search/item?nix_item_id=${branded.nix_item_id}`,
+      {
+        headers: {
+          "x-app-id": NUTRITIONIX_APP_ID,
+          "x-app-key": NUTRITIONIX_APP_KEY,
+        },
+      }
+    );
     if (!detailResp.ok) return null;
 
     const detailData = (await detailResp.json()) as NutritionixItemResponse;
@@ -162,7 +163,9 @@ async function fetchNutritionixNatural(query: string) {
 async function fetchOpenFoodFacts(query: string) {
   try {
     const resp = await fetch(
-      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&json=1&page_size=1`
+      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
+        query
+      )}&search_simple=1&json=1&page_size=1`
     );
     if (!resp.ok) return null;
 
@@ -189,18 +192,21 @@ async function fetchOpenFoodFacts(query: string) {
 /*                                  Handler                                   */
 /* -------------------------------------------------------------------------- */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
+
   const { description = "", photoUrl } = req.body || {};
-  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OpenAI key" });
+  if (!OPENAI_API_KEY)
+    return res.status(500).json({ error: "Missing OpenAI key" });
 
   try {
-    /* ---------- Stage 1: Identify foods (GPT-4o Vision) ---------- */
+    /* ---------- Stage 1: Identify foods ---------- */
     const stage1Prompt = `
 You are a nutrition analyst. Identify all edible items and portion sizes from the given text and image.
 Return STRICT JSON only:
 {
   "foods": [{"name":"string","portion_text":"e.g. 150 g or 1 cup"}],
-  "summary": "short human summary"
+  "summary":"short summary"
 }
 `;
 
@@ -208,6 +214,7 @@ Return STRICT JSON only:
       { role: "system", content: stage1Prompt },
       { role: "user", content: description || "(no description)" },
     ];
+
     if (photoUrl) {
       stage1Msgs.push({
         role: "user",
@@ -220,17 +227,32 @@ Return STRICT JSON only:
 
     const stage1Resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({ model: "gpt-4o", messages: stage1Msgs, temperature: 0 }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o", // 👁 Vision model
+        messages: stage1Msgs,
+        temperature: 0,
+      }),
     });
 
     const stage1Data = (await stage1Resp.json()) as OpenAIResponse;
     const stage1Content = stage1Data?.choices?.[0]?.message?.content ?? "";
     const stage1 = extractJson(stage1Content) ?? { foods: [] };
 
-    /* ---------- Stage 1.5: Manager (databases) ---------- */
-    const foodList = stage1.foods?.map((f: any) => `${f.portion_text || ""} ${f.name}`) || [];
-    const verified = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 };
+    /* ---------- Stage 1.5: Database manager ---------- */
+    const foodList =
+      stage1.foods?.map((f: any) => `${f.portion_text || ""} ${f.name}`) || [];
+    const verified = {
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      fiber: 0,
+      sodium: 0,
+    };
 
     for (const item of foodList) {
       const branded = await fetchNutritionixInstant(item);
@@ -248,18 +270,26 @@ Return STRICT JSON only:
       }
     }
 
-    /* ---------- Stage 2: AI Refinement ---------- */
+    /* ---------- Stage 2: AI refinement ---------- */
     const stage2Prompt = `
-You are an expert dietitian. Given verified database totals and the food list, fill missing micronutrients realistically.
-Ensure totals are plausible (<2000 kcal per meal). Respond with one JSON only:
-{
-  "protein":0,"calories":0,"carbs":0,"fat":0,
-  "vitaminA":0,"vitaminC":0,"vitaminD":0,"vitaminE":0,"vitaminK":0,"vitaminB12":0,
-  "iron":0,"calcium":0,"magnesium":0,"zinc":0,
-  "water":0,"sodium":0,"potassium":0,"chloride":0,"fiber":0
-}
+You are an expert dietitian.
+Given verified totals from Nutritionix / OpenFoodFacts,
+fill in micronutrients realistically — but DO NOT increase macros unrealistically.
+If numbers look extreme, normalize to plausible single-meal ranges:
+- Calories: 300–1100 kcal
+- Protein: 5–60 g
+- Carbs: 5–150 g
+- Fat: 5–60 g
+- Sodium: 100–1500 mg
+- Fiber: 0–15 g
 
-Database verified totals:
+Output ONLY one JSON with:
+protein (g), calories (kcal), carbs (g), fat (g),
+vitaminA (µg), vitaminC (mg), vitaminD (µg), vitaminE (mg), vitaminK (µg), vitaminB12 (µg),
+iron (mg), calcium (mg), magnesium (mg), zinc (mg),
+water (ml), sodium (mg), potassium (mg), chloride (mg), fiber (g).
+
+Verified database totals:
 ${JSON.stringify(verified)}
 
 Foods:
@@ -268,7 +298,10 @@ ${JSON.stringify(foodList)}
 
     const stage2Resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
       body: JSON.stringify({
         model: "gpt-4o",
         messages: [{ role: "system", content: stage2Prompt }],
@@ -281,10 +314,20 @@ ${JSON.stringify(foodList)}
     const stage2Content = stage2Data?.choices?.[0]?.message?.content ?? "";
     const parsed = extractJson(stage2Content);
 
-    if (parsed) return res.status(200).json(buildCompleteNutrition(parsed));
+    // ✅ Clamp macros to realistic meal ranges
+    if (parsed) {
+      parsed.calories = Math.min(Math.max(parsed.calories, 100), 1100);
+      parsed.protein = Math.min(Math.max(parsed.protein, 5), 60);
+      parsed.carbs = Math.min(Math.max(parsed.carbs, 5), 150);
+      parsed.fat = Math.min(Math.max(parsed.fat, 5), 60);
+      return res.status(200).json(buildCompleteNutrition(parsed));
+    }
+
     return res.status(500).json({ error: "Failed to parse nutrition JSON" });
   } catch (err: any) {
     console.error("❌ analyze-meal error:", err);
-    return res.status(500).json({ error: "Server error", details: err.message });
+    return res
+      .status(500)
+      .json({ error: "Server error", details: err.message });
   }
 }
