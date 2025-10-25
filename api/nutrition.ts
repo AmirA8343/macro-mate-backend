@@ -75,12 +75,11 @@ Do not calculate calories or macros.
   const stage1Resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-   body: JSON.stringify({ model: "gpt-4o", messages: stage1Msgs, temperature: 0 }),
-
+    body: JSON.stringify({ model: "gpt-4o", messages: stage1Msgs, temperature: 0 }),
   });
-  const stage1Data = (await stage1Resp.json()) as any;
-const stage1Content: string = stage1Data.choices?.[0]?.message?.content ?? "";
 
+  const stage1Data = (await stage1Resp.json()) as any;
+  const stage1Content: string = stage1Data.choices?.[0]?.message?.content ?? "";
   const stage1 = extractJson(stage1Content) ?? { foods: [] };
 
   // --- Stage 2: compute nutrition ---
@@ -97,22 +96,18 @@ If unknown, use 0. Double-check that totals are realistic (not >2000 kcal per me
 Respond with JSON only.
 `;
 
-const stage2Resp = await fetch("https://api.openai.com/v1/chat/completions", {
-  method: "POST",
-  headers: { 
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${OPENAI_API_KEY}`
-  },
-  body: JSON.stringify({
-    model: "gpt-4o", // ← changed from gpt-4o-mini
-    messages: [{ role: "system", content: stage2Prompt }],
-    temperature: 0,
-    max_tokens: 800,
-  }),
-});
+  const stage2Resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "system", content: stage2Prompt }],
+      temperature: 0,
+      max_tokens: 800,
+    }),
+  });
 
-
-  const stage2Data = await stage2Resp.json() as any;
+  const stage2Data = (await stage2Resp.json()) as any;
   const stage2Content: string = stage2Data.choices?.[0]?.message?.content ?? "";
   const parsed = extractJson(stage2Content);
 
